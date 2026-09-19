@@ -305,7 +305,7 @@ def narrate_from_metrics(ctx: dict) -> str:
     if hits:
         parts.append(f"{hits} decision(s) reused learned precedent from the Financial Memory Graph — the rules taught earlier are now doing the work.")
     if audits:
-        parts.append(f"The Audit agent re-performed {audits} medium-confidence decision(s) and confirmed {audit_ok}.")
+        parts.append(f"The Audit agent re-performed {audits} pending or sampled decision(s) and confirmed {audit_ok}.")
     if learned:
         parts.append(f"{learned} new rule(s) were learned this period.")
     if acc is not None:

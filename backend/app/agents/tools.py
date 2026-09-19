@@ -12,9 +12,9 @@ from __future__ import annotations
 import itertools
 import re
 from datetime import date, timedelta
-from typing import Any
+from typing import Any, cast
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.agents.base import ToolRegistry, jsonable
@@ -129,7 +129,7 @@ def _ap_candidate(inv: APInvoice) -> dict[str, Any]:
         "currency": inv.currency,
         "fx_rate": inv.fx_rate,
         "date": inv.date.isoformat(),
-        "due_date": inv.due_date.isoformat(),
+        "due_date": cast(date, inv.due_date).isoformat(),
         "period_id": inv.period_id,
         "counterparty_type": "vendor",
         "counterparty_id": inv.vendor_id,
@@ -152,7 +152,7 @@ def _ar_candidate(inv: ARInvoice) -> dict[str, Any]:
         "currency": inv.currency,
         "fx_rate": None,
         "date": inv.date.isoformat(),
-        "due_date": inv.due_date.isoformat(),
+        "due_date": cast(date, inv.due_date).isoformat(),
         "period_id": inv.period_id,
         "counterparty_type": "customer",
         "counterparty_id": inv.customer_id,
@@ -205,7 +205,7 @@ def _payroll_candidates(pr: PayrollRun) -> list[dict[str, Any]]:
                 "counterparty_id": None,
                 "linked_ids": [],
                 "side": "out",
-                "status": "cleared" if pr.bank_txn_id else "open",
+                "status": "open",
             }
         )
     return out
@@ -549,9 +549,9 @@ def _resolve_counterparty_rows(session: Session, bt: dict[str, Any]) -> dict[str
             if pay is not None:
                 consider(0.90, 99, "vendor", session.get(Vendor, pay.vendor_id), "reference")
         elif refs["ap_invoice_ids"]:
-            inv = session.get(APInvoice, refs["ap_invoice_ids"][0])
-            if inv is not None:
-                consider(0.90, 99, "vendor", session.get(Vendor, inv.vendor_id), "reference")
+            ap_invoice = session.get(APInvoice, refs["ap_invoice_ids"][0])
+            if ap_invoice is not None:
+                consider(0.90, 99, "vendor", session.get(Vendor, ap_invoice.vendor_id), "reference")
 
     if best is not None and best[3] is not None:
         conf, _, cp_type, row = best
@@ -586,11 +586,10 @@ def resolve_counterparty(session: Session, bank_txn: dict[str, Any] | str) -> di
     Args:
         bank_txn: bank transaction dict (from get_bank_txn) or its id.
     """
-    if isinstance(bank_txn, str):
-        bank_txn = get_bank_txn(session, bank_txn)
-    if not bank_txn:
+    payload = get_bank_txn(session, bank_txn) if isinstance(bank_txn, str) else bank_txn
+    if not payload:
         return {"type": "unknown", "id": None, "name": None, "confidence": 0.0, "method": "none", "references": {}}
-    return _resolve_counterparty_rows(session, bank_txn)
+    return _resolve_counterparty_rows(session, payload)
 
 
 @registry.register
@@ -631,9 +630,27 @@ def counterparty_candidates(
     elif cp_type == "payroll":
         for pid in {period_id, adjacent_period(period_id or "", -1)}:
             if pid:
-                for pr in session.scalars(select(PayrollRun).where(PayrollRun.period_id == pid, PayrollRun.bank_txn_id.is_(None))):
-                    out.extend(_payroll_candidates(pr))
+                settled = list(session.scalars(select(BankTransaction).where(BankTransaction.period_id == pid, BankTransaction.reconciled.is_(True))))
+                for pr in session.scalars(select(PayrollRun).where(PayrollRun.period_id == pid)):
+                    out.extend(c for c in _payroll_candidates(pr) if not any(pr.id in bank.reconciled_with and abs(abs(bank.amount) - c["expected_usd"]) <= 0.01 for bank in settled))
     return out
+
+
+@registry.register
+def payment_has_bank_evidence(session: Session, payment_id: str, period_id: str) -> bool:
+    payment = session.get(Payment, payment_id)
+    if payment is None:
+        return False
+    amounts = []
+    for bank in session.scalars(select(BankTransaction).where(BankTransaction.period_id == period_id, BankTransaction.amount < 0)):
+        cp = _resolve_counterparty_rows(session, row_to_dict(bank))
+        if cp["type"] != "vendor" or cp["id"] != payment.vendor_id:
+            continue
+        referenced = set(cp["references"].get("all", []))
+        if referenced.intersection({payment.id, *payment.ap_invoice_ids}):
+            return True
+        amounts.append(abs(bank.amount))
+    return any(abs(value - payment.amount) <= 0.01 for value in amounts) or any(abs(a + b - payment.amount) <= 0.01 for a, b in itertools.combinations(amounts, 2))
 
 
 @registry.register
@@ -775,10 +792,10 @@ def three_way_match(session: Session, ap_invoice_id: str) -> dict[str, Any]:
     if po is not None and po.amount:
         variance_pct = round((inv.amount - po.amount) / po.amount, 4)
     tolerance = settings.price_tolerance_pct
-    receipts_ok: bool | None = None
+    receipts_ok = False
     if receipts:
         receipts_ok = received_total >= min(inv.amount, po.amount if po else inv.amount) * (1 - tolerance) - 0.01
-    ok = po is not None and variance_pct is not None and variance_pct <= tolerance + 1e-9 and receipts_ok is not False
+    ok = po is not None and variance_pct is not None and variance_pct <= tolerance + 1e-9 and receipts_ok and po.vendor_id == inv.vendor_id and po.currency == inv.currency
     return {
         "invoice": row_to_dict(inv),
         "po": row_to_dict(po),
@@ -835,7 +852,7 @@ def ar_aging(session: Session, period_id: str) -> dict[str, Any]:
         remaining = round(inv.amount - (inv.paid_amount or 0.0), 2)
         if remaining <= 0:
             continue
-        overdue = (end - inv.due_date).days
+        overdue = (end - cast(date, inv.due_date)).days
         key = "current" if overdue <= 0 else "1-30" if overdue <= 30 else "31-60" if overdue <= 60 else "61-90" if overdue <= 90 else "90+"
         buckets[key] = round(buckets[key] + remaining, 2)
         by_customer[inv.customer_id] = round(by_customer.get(inv.customer_id, 0.0) + remaining, 2)
@@ -1007,6 +1024,8 @@ def mark_reconciled(
     bt = session.get(BankTransaction, bank_txn_id)
     if bt is None:
         raise ValueError(f"unknown bank transaction {bank_txn_id}")
+    if bt.reconciled:
+        raise ValueError(f"bank transaction {bank_txn_id} is already reconciled")
     matched_rows = _load_matched(session, matched_ids)
     cash = round(abs(bt.amount), 2)
     lines = ledger if ledger else _default_ledger(bt, matched_rows, note)
@@ -1028,6 +1047,13 @@ def mark_reconciled(
             if inv is not None and all(r.id != inv.id for _, r in invoices):
                 invoices.append(("ap_invoice", inv))
     invoices.sort(key=lambda kr: (kr[1].date, kr[1].id))
+    before = {
+        "bank": {key: row_to_dict(bt)[key] for key in ("id", "reconciled", "status", "reconciled_with", "reconciliation_note")},
+        "ap": [{key: row_to_dict(row)[key] for key in ("id", "paid_amount", "status", "matched_bank_txn_ids")} for kind, row in invoices if kind == "ap_invoice"],
+        "ar": [{key: row_to_dict(row)[key] for key in ("id", "paid_amount", "status", "matched_bank_txn_ids")} for kind, row in invoices if kind == "ar_invoice"],
+        "payments": [{"id": row.id, "bank_txn_id": row.bank_txn_id, "status": row.status} for row in payments],
+        "payroll": [{"id": row.id, "bank_txn_id": row.bank_txn_id} for kind, row in matched_rows if kind == "payroll"],
+    }
     remaining_cash = gross
     applied: dict[str, float] = {}
     for kind, inv in invoices:
@@ -1070,7 +1096,29 @@ def mark_reconciled(
         "cash": cash,
         "adjustment": round(adjustment, 2),
         "ledger": posted,
+        "before": before,
     }
+
+
+@registry.register(mutating=True)
+def undo_reconciliation(session: Session, execution: dict) -> None:
+    before = execution["before"]
+    bank_id = before["bank"]["id"]
+    for table, key in ((APInvoice, "ap"), (ARInvoice, "ar")):
+        for row in before[key]:
+            invoice = session.get(APInvoice, row["id"]) if key == "ap" else session.get(ARInvoice, row["id"])
+            if invoice is None or set(invoice.matched_bank_txn_ids) != {*row["matched_bank_txn_ids"], bank_id}:
+                raise ValueError("Dependent settlement changed; controller must unwind later settlements first")
+    for model, rows in (
+        (BankTransaction, [before["bank"]]), (APInvoice, before["ap"]),
+        (ARInvoice, before["ar"]), (Payment, before["payments"]), (PayrollRun, before["payroll"]),
+    ):
+        if rows:
+            session.execute(update(model), rows)
+    for row in execution["ledger"]:
+        entry = session.get(LedgerEntry, row["id"])
+        if entry:
+            session.delete(entry)
 
 
 @registry.register(mutating=True)
