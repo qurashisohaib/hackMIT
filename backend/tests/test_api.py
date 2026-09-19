@@ -241,6 +241,16 @@ async def test_mutations_conflict_while_writer_active(api: API) -> None:
         assert (await api.client.get("/api/periods")).status_code == 200
 
 
+async def test_deliverables_are_absent_before_a_close_without_writing_memory(api: API) -> None:
+    before = api.manager.memory.store.stats()
+    for path in ("/api/forecast?period_id=2026-01", "/api/reports/2026-01"):
+        response = await api.client.get(path)
+        assert response.status_code == 404
+        assert "Run the selected period close" in response.json()["detail"]
+    assert api.manager.memory.store.stats() == before
+    assert (await api.client.get("/api/runs")).json() == []
+
+
 async def test_background_failure_persisted_and_slot_released(api: API) -> None:
     with patch("app.api.runs.get_cfo", side_effect=RuntimeError("Pipeline unavailable")):
         response = await api.client.post("/api/runs", json={"period_id": "2026-01"})

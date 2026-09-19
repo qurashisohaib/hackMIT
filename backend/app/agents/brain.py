@@ -81,6 +81,7 @@ def _trust_text(rule: dict[str, Any] | None) -> str:
 _PERCENT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:%|percent|pct|per\s*cent)", re.I)
 _DOLLAR_RE = re.compile(r"(?:\$|usd\s*)\s*(\d+(?:,\d{3})*(?:\.\d+)?)|(\d+(?:,\d{3})*(?:\.\d+)?)\s*(?:dollars?|usd|bucks)", re.I)
 _DAYS_RE = re.compile(r"(\d+)\s*(?:business\s+|calendar\s+)?days?", re.I)
+_TRANSFER_RULE_RE = re.compile(r"(?:all\s+)?(outgoing|incoming)\s+(wire|ach)\s+(?:transfers|payments)\b", re.I)
 _DEDUCT_WORDS = ("deduct", "withhold", "net of", "less ", "minus", "takes", "keeps", "retain", "short", "nets", "subtract", "discount", "pays less", "pay less")
 _ADD_WORDS = ("add", "surcharge", "extra", "on top", "plus", "markup", "mark-up", "charges more", "charge more", "premium", "over the invoice")
 _FX_WORDS = ("fx", "exchange", "currency", "eur", "gbp", "forex", "conversion")
@@ -247,7 +248,11 @@ def parse_rule_text(text: str, ctx: dict | None = None) -> RuleSpec | None:
 
     cp_type = ctx.get("counterparty_type") or (ctx.get("counterparty") or {}).get("type")
     cp_id = ctx.get("counterparty_id") or (ctx.get("counterparty") or {}).get("id")
-    if has(_GLOBAL_WORDS) or cp_type not in ("vendor", "customer") or not cp_id:
+    transfer = _TRANSFER_RULE_RE.match(raw)
+    if transfer:
+        params["bank_type"] = transfer.group(2).lower()
+        params["cash_direction"] = "out" if transfer.group(1).lower() == "outgoing" else "in"
+    if transfer or has(_GLOBAL_WORDS) or cp_type not in ("vendor", "customer") or not cp_id:
         scope_type, scope_id = ScopeType.GLOBAL, None
     else:
         scope_type, scope_id = ScopeType(cp_type), cp_id

@@ -4,6 +4,7 @@ from datetime import date
 from math import isfinite
 
 from app.agents.base import BaseAgent
+from app.agents.hypotheses import rule_matches_bank
 from app.agents.records import memory_for
 from app.config import settings
 from app.schemas import AuditCheck, Hypothesis, RuleSpec
@@ -125,6 +126,7 @@ def bank_checks(agent: BaseAgent, entity: dict, hypothesis: Hypothesis, spec: Ru
             and all(row["kind"] == "ar_invoice" and row["customer_id"] == spec.scope_id for row in roots)
         )
         checks.append(check("rule_scope", scope_ok, "Rule scope agrees with financial counterparty"))
+        checks.append(check("rule_transaction", rule_matches_bank(spec.params, entity), "Rule agrees with bank method and cash direction"))
         if spec.pattern_type.value == "fx_tolerance":
             checks.append(check("currency", foreign_currency, "FX policy requires foreign currency evidence"))
         checks.append(check("rule_arithmetic", rule_fit(spec, observed, gross), f"Recomputed gross={gross:.2f}, bank={observed:.2f}"))

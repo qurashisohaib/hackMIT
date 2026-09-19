@@ -83,7 +83,7 @@ to this synthetic demo's history.
 | Stripe (`V-STRIPE`) | `Stripe deducts a 3% processing fee` | 2 |
 | CloudSpan (`V001`) | `CloudSpan adds a 2% surcharge` | 1 |
 | An outgoing wire with a $25 difference | `Outgoing wire transfers add a $25 bank fee` | 1 |
-| Northstar (`C001`) | `Northstar takes a 2% early payment discount` | 1 |
+| Apex Manufacturing (`C001`) | `Apex Manufacturing takes a 2% early payment discount` | 1 |
 | Bosch (`V002`) | `Accept up to 1.5% FX variance for Bosch` | 0; there is one such January case |
 
 The heuristic parser supports these phrases without OpenAI. A correction must also pass

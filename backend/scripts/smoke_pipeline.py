@@ -22,7 +22,7 @@ TEACHINGS = [
     RuleSpec(pattern_type="percentage_fee", scope_type="vendor", scope_id="V-STRIPE", params={"rate": 0.03, "direction": "deduct"}, description="Stripe deducts a 3% processing fee"),
     RuleSpec(pattern_type="percentage_fee", scope_type="vendor", scope_id="V001", params={"rate": 0.02, "direction": "add"}, description="CloudSpan adds a 2% surcharge"),
     RuleSpec(pattern_type="fixed_fee", scope_type="global", params={"amount": 25, "direction": "add"}, description="Outgoing wire transfers add a $25 bank fee"),
-    RuleSpec(pattern_type="early_pay_discount", scope_type="customer", scope_id="C001", params={"rate": 0.02, "direction": "deduct"}, description="Northstar takes a 2% early payment discount"),
+    RuleSpec(pattern_type="early_pay_discount", scope_type="customer", scope_id="C001", params={"rate": 0.02, "direction": "deduct"}, description="Apex Manufacturing takes a 2% early payment discount"),
     RuleSpec(pattern_type="fx_tolerance", scope_type="vendor", scope_id="V002", params={"tolerance_pct": 0.015}, description="Accept up to 1.5% FX variance for Bosch"),
 ]
 
@@ -45,7 +45,7 @@ async def teach(ctx: AgentContext, spec: RuleSpec) -> str:
         if node.props["entity_type"] != "bank_transaction":
             continue
         try:
-            result = await cfo.resolve_exception(node.id, ResolveRequest(action="teach", rule=spec, explanation=spec.description), ctx)
+            result = await cfo.resolve_exception(node.id, ResolveRequest(action="teach", explanation=spec.description), ctx)
         except ValueError as exc:
             failures.append(str(exc))
             continue

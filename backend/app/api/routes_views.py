@@ -1,10 +1,9 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import ValidationError
 from sqlalchemy import func, select
 
 from app.agents.brain import get_brain
 from app.api.dependencies import Manager
-from app.api.pipeline import get_cfo, get_forecast_builder, get_report_builder
 from app.api.routes_data import DATA_TABLES
 from app.config import settings
 from app.data.seed import seed_database
@@ -73,9 +72,7 @@ async def forecast(manager: Manager, period_id: str | None = None) -> ForecastVi
         except (ValidationError, KeyError):
             continue
     with manager.mutation("the cash forecast is being refreshed"):
-        context = get_cfo().make_context(period_id, step_delay_ms=0)
-        context.run_id = None
-        return await get_forecast_builder().build_forecast(context)
+        raise HTTPException(404, "Run the selected period close to generate its forecast")
 
 
 @router.get("/reports/{period_id}", response_model=CloseReport)
@@ -88,9 +85,7 @@ async def report(period_id: str, manager: Manager) -> CloseReport:
             except (ValidationError, KeyError):
                 continue
     with manager.mutation("the close report is being refreshed"):
-        context = get_cfo().make_context(period_id, step_delay_ms=0)
-        context.run_id = None
-        return await get_report_builder().build_report(context)
+        raise HTTPException(404, "Run the selected period close to generate its report")
 
 
 @router.post("/reset")

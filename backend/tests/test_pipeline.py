@@ -8,7 +8,9 @@ from sqlalchemy import select
 
 from app.agents import cfo
 from app.agents.audit import AuditAgent
-from app.agents.hypotheses import investigate_bank_txn
+from app.agents.brain import parse_rule_text
+from app.agents.evidence import bank_checks
+from app.agents.hypotheses import _gather_bank_facts, gen_memory_rules, gen_precedent_drift, investigate_bank_txn
 from app.agents.recon import ReconAgent
 from app.agents.records import open_exceptions, remember
 from app.config import settings
@@ -78,6 +80,43 @@ async def test_unlearned_stripe_stays_at_42_percent(isolated: MemoryService) -> 
     with ctx.session() as session:
         assert not session.get(BankTransaction, txn_id).reconciled
         assert not session.scalars(select(LedgerEntry).where(LedgerEntry.source_id == txn_id, LedgerEntry.created_by.like("agent:%"))).all()
+
+
+async def test_plain_language_teaching_propagates_across_the_documented_counterparties(isolated: MemoryService) -> None:
+    ctx = cfo.make_context("2026-01", step_delay_ms=0)
+    await cfo.run_period_close(ctx.period_id, ctx=ctx)
+    for spec, expected_siblings in zip(TEACHINGS, (2, 1, 1, 1, 0), strict=True):
+        before = len(open_exceptions(ctx))
+        rule_id = await teach(ctx, spec)
+        assert len(open_exceptions(ctx)) == before - expected_siblings - 1
+        rule = isolated.store.get_node(rule_id)
+        assert rule.props["scope_type"] == spec.scope_type.value
+        assert rule.props["scope_id"] == spec.scope_id
+        for key, value in spec.params.items():
+            assert rule.props["params"][key] == value
+    assert cfo.compute_metrics(ctx).human_reviews == 3
+
+
+@pytest.mark.parametrize(("bank_type", "amount_sign"), [("ach", -1), ("wire", 1)])
+async def test_transfer_rules_reject_other_methods_and_directions(isolated: MemoryService, bank_type: str, amount_sign: int) -> None:
+    ctx = cfo.make_context("2026-01", step_delay_ms=0)
+    agent = ReconAgent(ctx)
+    with ctx.session() as session:
+        truth = session.scalar(select(GroundTruth).where(GroundTruth.period_id == ctx.period_id, GroundTruth.entity_type == "bank_transaction", GroundTruth.exception_type == "wire_fee"))
+        txn_id = truth.entity_id
+    spec = parse_rule_text("Outgoing wire transfers add a $25 bank fee", {"counterparty_type": "vendor", "counterparty_id": "V004"})
+    assert spec is not None and spec.scope_type.value == "global"
+    rule_id = isolated.learn_rule(spec, "controller", ctx.period_id, human_verified=True)
+    entity = agent.call_tool("get_bank_txn", id=txn_id)
+    facts = _gather_bank_facts(ctx, agent, entity)
+    hypotheses = [hypothesis for hypothesis in gen_memory_rules(facts, agent) if hypothesis.passed]
+    assert len(hypotheses) == 1 and hypotheses[0].rule_id == rule_id
+    altered = {**entity, "type": bank_type, "amount": abs(entity["amount"]) * amount_sign}
+    facts.bt = altered
+    assert gen_memory_rules(facts, agent) == []
+    assert gen_precedent_drift(facts, agent) == []
+    checks = bank_checks(agent, altered, hypotheses[0], spec)
+    assert not next(check for check in checks if check.name == "rule_transaction").passed
 
 
 async def test_teaching_rejects_wrong_scope_rate_and_evidence_without_writes(isolated: MemoryService) -> None:

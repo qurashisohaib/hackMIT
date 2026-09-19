@@ -695,6 +695,15 @@ def _rule_expectations(rule: dict[str, Any], base: float, side: str) -> list[dic
     return out
 
 
+def rule_matches_bank(params: dict, bank: dict) -> bool:
+    bank_type = params.get("bank_type")
+    direction = params.get("cash_direction")
+    return (
+        (bank_type is None or bank_type == bank.get("type"))
+        and (direction is None or direction == ("out" if float(bank["amount"]) < 0 else "in"))
+    )
+
+
 def gen_memory_rules(f: BankFacts, agent: BaseAgent) -> list[Hypothesis]:
     """Each applicable learned Rule → parameterised hypothesis tested against the open items."""
     if not f.rules:
@@ -704,7 +713,7 @@ def gen_memory_rules(f: BankFacts, agent: BaseAgent) -> list[Hypothesis]:
     out: list[Hypothesis] = []
     for rule in f.rules:
         kind = RULE_KIND.get(rule["pattern_type"] or "")
-        if kind is None:
+        if kind is None or not rule_matches_bank(rule["params"], f.bt):
             continue
         pool = [
             c for c in candidates
@@ -775,6 +784,8 @@ def gen_precedent_drift(f: BankFacts, agent: BaseAgent) -> list[Hypothesis]:
     for rule in f.rules:
         pt = rule["pattern_type"]
         p = rule.get("params") or {}
+        if not rule_matches_bank(p, f.bt):
+            continue
         best: tuple[float, dict[str, Any], dict[str, Any], str, str] | None = None  # (distance, cand, implied, description, adjustment_kind)
         for c in pool:
             base = c["expected_usd"]

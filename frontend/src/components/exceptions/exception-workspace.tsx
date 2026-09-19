@@ -71,7 +71,7 @@ export function ExceptionWorkspace() {
   const items = state.key === filterKey ? state.items : [];
   const query = search.trim().toLowerCase();
   const visible = items.filter((item) =>
-    [item.id, item.title, item.counterparty_name, item.entity_id, item.category].some((value) => value?.toLowerCase().includes(query)),
+    [item.id, item.title, item.counterparty_name, item.counterparty_id, item.entity_id, item.category].some((value) => value?.toLowerCase().includes(query)),
   );
   const periodOptions = [...new Map([
     ...state.periods.map((p) => [p.id, p.name] as const),
