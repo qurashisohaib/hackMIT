@@ -1,0 +1,39 @@
+[project]
+name = "cfo-office"
+version = "0.1.0"
+description = "AI Office of the CFO with a Financial Memory Graph"
+authors = [
+    { name = "SteelzX", email = "qurashisohaib@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.141.1",
+    "httpx>=0.28.1",
+    "neo4j>=6.3.1",
+    "networkx>=3.6.1",
+    "numpy>=2.5.3",
+    "openai>=3.16.2",
+    "openai-agents>=0.22.3",
+    "pandas>=3.0.6",
+    "pydantic>=2.13.5",
+    "python-dotenv>=1.2.3",
+    "sqlalchemy>=2.0.54",
+    "sse-starlette>=3.4.11",
+    "uvicorn[standard]>=0.53.0",
+]
+
+["uv_build>=0.12.11,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
