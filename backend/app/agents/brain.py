@@ -569,6 +569,10 @@ class OpenAIBrain:
 
     async def parse_correction(self, text: str, ctx: dict) -> RuleSpec | None:
         """Structured teaching parse; the regex parser is the fallback (and the tie-breaker)."""
+        if _TRANSFER_RULE_RE.match(text.strip()):
+            parsed = parse_rule_text(text, ctx)
+            if parsed is not None:
+                return parsed
 
         async def attempt() -> RuleSpec | None:
             out = await self._run("teacher", self._prompt({**ctx, "text": text}, f"Parse this correction into a rule: {text!r}"), ctx, max_turns=2)

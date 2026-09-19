@@ -1,21 +1,24 @@
 from __future__ import annotations
 
+from asyncio import CancelledError
 from collections.abc import Iterator
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import select
 
 from app.agents import cfo
 from app.agents.audit import AuditAgent
-from app.agents.brain import parse_rule_text
+from app.agents.brain import OpenAIBrain, parse_rule_text
 from app.agents.evidence import bank_checks
 from app.agents.hypotheses import _gather_bank_facts, gen_memory_rules, gen_precedent_drift, investigate_bank_txn
 from app.agents.recon import ReconAgent
 from app.agents.records import open_exceptions, remember
+from app.agents.tools import row_to_dict
 from app.config import settings
 from app.data.seed import seed_database
-from app.db.models import APInvoice, ARInvoice, BankTransaction, GroundTruth, LedgerEntry, Payment
+from app.db.models import APInvoice, ARInvoice, BankTransaction, GroundTruth, LedgerEntry, Payment, PayrollRun, Period
 from app.db.session import reset_engine
 from app.events import bus
 from app.memory.service import MemoryService, reset_memory_service
@@ -95,6 +98,43 @@ async def test_plain_language_teaching_propagates_across_the_documented_counterp
         for key, value in spec.params.items():
             assert rule.props["params"][key] == value
     assert cfo.compute_metrics(ctx).human_reviews == 3
+
+
+async def test_openai_preserves_deterministic_transfer_constraints(isolated: MemoryService) -> None:
+    brain = OpenAIBrain()
+    with patch.object(brain, "_run", new_callable=AsyncMock) as llm:
+        rule = await brain.parse_correction("Outgoing wire transfers add a $25 bank fee", {"counterparty_type": "vendor", "counterparty_id": "V004"})
+    llm.assert_not_called()
+    assert rule is not None and rule.scope_type.value == "global"
+    assert rule.params == {"amount": 25, "direction": "add", "bank_type": "wire", "cash_direction": "out"}
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("Report unavailable"), CancelledError()])
+async def test_failed_close_restores_financial_baseline(isolated: MemoryService, failure: BaseException) -> None:
+    ctx = cfo.make_context("2026-01", step_delay_ms=0)
+    models = (BankTransaction, APInvoice, ARInvoice, Payment, PayrollRun, LedgerEntry)
+    with ctx.session() as session:
+        before = {model.__tablename__: [row_to_dict(row) for row in session.scalars(select(model).order_by(model.id))] for model in models}
+    with patch("app.agents.report.build_report", new_callable=AsyncMock, side_effect=failure):
+        with pytest.raises(type(failure)):
+            await cfo.run_period_close(ctx.period_id, ctx=ctx)
+    with ctx.session() as session:
+        after = {model.__tablename__: [row_to_dict(row) for row in session.scalars(select(model).order_by(model.id))] for model in models}
+        assert session.get(Period, ctx.period_id).status == "open"
+    assert after == before
+    assert not open_exceptions(ctx)
+    assert not isolated.store.find_nodes("Observation", key="forecast", scope_id=ctx.period_id)
+    assert bus.history(ctx.run_id)[-1].kind == "run.failed"
+
+
+async def test_forecast_uses_global_percentage_rules(isolated: MemoryService) -> None:
+    ctx = cfo.make_context("2026-01", step_delay_ms=0)
+    baseline = await cfo.forecast.build_forecast(ctx)
+    for pattern, direction in (("early_pay_discount", "deduct"), ("percentage_fee", "add")):
+        isolated.learn_rule(RuleSpec(pattern_type=pattern, scope_type="global", params={"rate": 0.02, "direction": direction}, description=f"Global {pattern}"), "controller", ctx.period_id, human_verified=True)
+    adjusted = await cfo.forecast.build_forecast(ctx)
+    assert len([item for item in adjusted.assumptions if item["source"] == "rule"]) == 2
+    assert adjusted.weeks[-1].ending_cash < baseline.weeks[-1].ending_cash
 
 
 @pytest.mark.parametrize(("bank_type", "amount_sign"), [("ach", -1), ("wire", 1)])

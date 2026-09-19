@@ -86,7 +86,7 @@ class RunManager:
             run.started_at = utcnow()
             run.current_step = "Preparing period close"
             cfo = get_cfo()
-            cfo.reset_period_state(run.period_id, memory=self.memory)
+            cfo.reset_period_state(run.period_id, memory=self.memory, keep_run_id=run.run_id)
             with get_session() as session:
                 period = session.get(Period, run.period_id)
                 if period is None:

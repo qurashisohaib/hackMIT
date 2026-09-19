@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from asyncio import CancelledError
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from statistics import mean
@@ -66,7 +67,7 @@ def _snapshot(ctx: AgentContext) -> None:
     memory.record_observation("global", ctx.period_id, "execution_baseline", value, ctx.period_id)
 
 
-def reset_period_state(period_id: str, memory: MemoryService | None = None) -> None:
+def reset_period_state(period_id: str, memory: MemoryService | None = None, keep_run_id: str | None = None) -> None:
     memory = memory or get_memory_service()
     later = [node for node in memory.store.find_nodes("AgentRun", status="completed") if node.props["period_id"] > period_id and not node.props.get("superseded")]
     if later:
@@ -92,6 +93,8 @@ def reset_period_state(period_id: str, memory: MemoryService | None = None) -> N
         session.commit()
     for label in ("Exception", "Decision", "AgentRun"):
         for node in memory.store.find_nodes(label, period_id=period_id):
+            if node.id == keep_run_id:
+                continue
             props: dict = {"superseded": True}
             if label == "Exception":
                 props["status"] = "superseded"
@@ -261,11 +264,8 @@ async def run_period_close(period_id: str, run_id: str | None = None, ctx: Agent
         ctx.emit("cfo", "run.completed", f"Completed {period_id}", metrics=metrics.model_dump(mode="json"), counts=summary.counts)
         memory.record_agent_run(summary, bus.history(ctx.run_id))
         return summary
-    except Exception as exc:
-        with ctx.session() as session:
-            period = session.get(Period, period_id)
-            if period:
-                period.status = "pending_review"
+    except (Exception, CancelledError) as exc:
+        reset_period_state(period_id, memory, keep_run_id=ctx.run_id)
         ctx.emit("cfo", "run.failed", f"Close failed: {period_id}", str(exc))
         raise
 

@@ -482,6 +482,19 @@ async def test_earlier_rerun_is_rejected_before_creating_a_run(api: API) -> None
     assert len(api.manager.list()) == 1
 
 
+async def test_actual_completed_api_run_remains_active_and_blocks_earlier_reruns(api: API) -> None:
+    response = await api.client.post("/api/runs", json={"period_id": "2026-02"})
+    assert response.status_code == 202
+    run_id = response.json()["run_id"]
+    assert api.manager._task is not None
+    await api.manager._task
+    assert api.manager.get(run_id).status == "completed"
+    assert not api.manager.memory.store.get_node(run_id).props.get("superseded")
+    api.manager.rehydrate()
+    response = await api.client.post("/api/runs", json={"period_id": "2026-01"})
+    assert response.status_code == 409 and "Later periods" in response.json()["detail"]
+
+
 async def test_graph_focus_survives_recency_limit(api: API) -> None:
     store = api.manager.memory.store
     root = store.add_node("Rule", {"created_at": "2026-01-01"})

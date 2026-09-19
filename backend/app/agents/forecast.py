@@ -64,9 +64,11 @@ class ForecastAgent(BaseAgent):
                 customer = customers[invoice.customer_id]
                 processor_ids = {vendor.id for vendor in processors if customer.channel and customer.channel.lower() in (vendor.name + " " + vendor.id).lower()}
                 for rule in rules:
-                    if rule.props["scope_id"] not in {invoice.customer_id, *processor_ids}:
+                    if rule.props["scope_type"] != "global" and rule.props["scope_id"] not in {invoice.customer_id, *processor_ids}:
                         continue
                     params = rule.props["params"]
+                    if params.get("bank_type") or params.get("cash_direction", "in") != "in":
+                        continue
                     if rule.props["pattern_type"] in {"percentage_fee", "early_pay_discount"} and params.get("direction", "deduct") == "deduct":
                         fee = round(amount * float(params.get("rate", 0)), 2)
                         weekly[index]["fees"] += fee
@@ -80,9 +82,11 @@ class ForecastAgent(BaseAgent):
                     continue
                 weekly[index]["ap_payments"] += amount
                 for rule in rules:
-                    if rule.props["scope_type"] != "vendor" or rule.props["scope_id"] != ap_invoice.vendor_id:
+                    if rule.props["scope_type"] != "global" and (rule.props["scope_type"] != "vendor" or rule.props["scope_id"] != ap_invoice.vendor_id):
                         continue
                     params = rule.props["params"]
+                    if params.get("bank_type") or params.get("cash_direction", "out") != "out":
+                        continue
                     if rule.props["pattern_type"] == "percentage_fee" and params.get("direction") == "add":
                         fee = round(amount * float(params.get("rate", 0)), 2)
                         weekly[index]["fees"] += fee
