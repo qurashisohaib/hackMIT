@@ -410,5 +410,5 @@ class BaseAgent(ABC):
 
     # -- entry point ------------------------------------------------------------
     @abstractmethod
-    async def run(self, **kwargs: Any) -> Any:
+    async def run(self) -> object:
         """Execute the agent's job for the run in `self.ctx`."""

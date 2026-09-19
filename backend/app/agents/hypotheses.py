@@ -30,6 +30,7 @@ from app.schemas import (
     Hypothesis,
     HypothesisSpec,
     Tier,
+    new_id,
 )
 
 log = logging.getLogger(__name__)
@@ -331,7 +332,7 @@ def _announce(ctx: AgentContext, agent: BaseAgent, h: Hypothesis) -> Hypothesis:
         f"{h.kind} {verdict} ({h.confidence:.0%})",
         "; ".join(e.description for e in h.evidence)[:300],
         hypothesis_id=h.id,
-        kind=h.kind,
+        hypothesis_kind=h.kind,
         confidence=h.confidence,
         passed=h.passed,
         rule_id=h.rule_id,
@@ -439,7 +440,8 @@ def _gather_bank_facts(ctx: AgentContext, agent: BaseAgent, bt: dict[str, Any]) 
         if c["id"] not in known:
             candidates.append(c)
             known[c["id"]] = c
-    siblings = agent.try_tool("list_sibling_txns", [], bank_txn_id=bt["id"]) if counterparty.get("id") else []
+    exact_amount = any(abs(c["expected_usd"] - observed) <= AMOUNT_TOL for c in candidates)
+    siblings = agent.try_tool("list_sibling_txns", [], bank_txn_id=bt["id"]) if counterparty.get("id") and not exact_amount else []
     prev = agent.try_tool("adjacent_period", None, period_id=ctx.period_id, delta=-1)
     prev_in_transit = agent.try_tool("payments_in_transit", [], period_id=prev, days=IN_TRANSIT_DAYS) if prev and side == "out" else []
     payroll: list[dict[str, Any]] = []
@@ -477,14 +479,15 @@ def gen_exact_match(f: BankFacts) -> list[Hypothesis]:
         chosen = [live[0]]
     expected = round(sum(c["expected_usd"] for c in chosen), 2)
     diff = round(f.observed - expected, 2)
-    passed = abs(diff) <= AMOUNT_TOL
+    passed = abs(diff) <= AMOUNT_TOL and _cp_evidence(f, chosen).supports
     evidence = [
         _ev("memo_reference", f"memo references {', '.join(c['id'] for c in chosen)}", refs=[c["id"] for c in chosen]),
         _ev("amount_match", f"observed {_money(f.observed)} vs expected {_money(expected)} (Δ {diff:+,.2f})", supports=passed, observed=f.observed, expected=expected, diff=diff),
         _cp_evidence(f, chosen),
     ]
     desc = f"{_money(f.observed)} settles {' + '.join(c['id'] for c in chosen)} referenced in the memo" if passed else f"memo references {chosen[0]['id']} ({_money(expected)}) but the amount differs by {diff:+,.2f}"
-    return [_hyp("exact_match", desc, candidate_ids=_matched_ids(chosen), evidence=evidence, passed=passed, params={"expected": expected, "observed": f.observed, "difference": diff, "gross": expected, "candidates": [_cand_summary(c) for c in chosen]})]
+    kind = "combined_invoices" if len(chosen) > 1 else "exact_match"
+    return [_hyp(kind, desc, candidate_ids=_matched_ids(chosen), evidence=evidence, passed=passed, params={"expected": expected, "observed": f.observed, "difference": diff, "gross": expected, "candidates": [_cand_summary(c) for c in chosen]})]
 
 
 def gen_counterparty_exact(f: BankFacts) -> list[Hypothesis]:
@@ -563,7 +566,7 @@ def gen_split_payment(f: BankFacts) -> list[Hypothesis]:
     referenced_ids = {c["id"] for c in f.referenced}
     options: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for c in f.own_candidates():
-        if c["kind"] not in ("ar_invoice", "ap_invoice") or c["expected_usd"] <= f.observed + AMOUNT_TOL:
+        if c["kind"] not in ("ar_invoice", "ap_invoice", "payment") or c["expected_usd"] <= f.observed + AMOUNT_TOL:
             continue
         needed = round(c["expected_usd"] - f.observed, 2)
         for s in others:
@@ -692,17 +695,32 @@ def _rule_expectations(rule: dict[str, Any], base: float, side: str) -> list[dic
     return out
 
 
+def rule_matches_bank(params: dict, bank: dict) -> bool:
+    bank_type = params.get("bank_type")
+    direction = params.get("cash_direction")
+    return (
+        (bank_type is None or bank_type == bank.get("type"))
+        and (direction is None or direction == ("out" if float(bank["amount"]) < 0 else "in"))
+    )
+
+
 def gen_memory_rules(f: BankFacts, agent: BaseAgent) -> list[Hypothesis]:
     """Each applicable learned Rule → parameterised hypothesis tested against the open items."""
     if not f.rules:
         return []
-    pool = [c for c in f.candidates if c["kind"] in ("ar_invoice", "ap_invoice", "payment") and not c.get("settled")]
+    candidates = [c for c in f.own_candidates() if c["kind"] in ("ar_invoice", "ap_invoice", "payment") and not c.get("settled")]
     referenced_ids = {c["id"] for c in f.referenced}
     out: list[Hypothesis] = []
     for rule in f.rules:
         kind = RULE_KIND.get(rule["pattern_type"] or "")
-        if kind is None:
+        if kind is None or not rule_matches_bank(rule["params"], f.bt):
             continue
+        pool = [
+            c for c in candidates
+            if rule["scope_type"] == "global"
+            or rule["scope_type"] == f.counterparty["type"] and rule["scope_id"] == f.counterparty["id"]
+            or rule["scope_type"] == c["counterparty_type"] and rule["scope_id"] == c["counterparty_id"]
+        ]
         fits: list[tuple[dict[str, Any], dict[str, Any], float]] = []
         for c in pool:
             base = c["expected_usd"]
@@ -766,6 +784,8 @@ def gen_precedent_drift(f: BankFacts, agent: BaseAgent) -> list[Hypothesis]:
     for rule in f.rules:
         pt = rule["pattern_type"]
         p = rule.get("params") or {}
+        if not rule_matches_bank(p, f.bt):
+            continue
         best: tuple[float, dict[str, Any], dict[str, Any], str, str] | None = None  # (distance, cand, implied, description, adjustment_kind)
         for c in pool:
             base = c["expected_usd"]
@@ -910,7 +930,7 @@ def _test_spec(f: BankFacts, agent: BaseAgent, spec: HypothesisSpec, tested: lis
         expected = round(base * (1 - rate), 2) if direction == "deduct" else round(base * (1 + rate), 2)
     if fixed:
         expected = round(expected - fixed, 2) if direction == "deduct" else round(expected + fixed, 2)
-    passed = bool(cands) and abs(expected - f.observed) <= RULE_TOL
+    passed = bool(cands) and len(cands) == len(spec.candidate_ids) and abs(expected - f.observed) <= RULE_TOL and _cp_evidence(f, cands).supports
     evidence = [
         _ev("amount_match", f"proposed {spec.kind}: expected {_money(expected)} vs observed {_money(f.observed)} (Δ {f.observed - expected:+,.2f})", supports=passed, expected=expected, observed=f.observed, base=base),
         _cp_evidence(f, cands) if cands else _ev("counterparty_match", "no verifiable candidates named", supports=False),
@@ -925,8 +945,9 @@ def _test_spec(f: BankFacts, agent: BaseAgent, spec: HypothesisSpec, tested: lis
                 break
         if spec.kind.startswith("rule_") and spec.rule_id:
             conf = min(conf, LLM_CAP)
-        if (rate or fixed) and not spec.rule_id:
-            conf = min(conf, score("observed_pattern"))
+        if rate or fixed:
+            verified = [h for h in tested if h.passed and h.rule_id == spec.rule_id and h.kind.startswith("rule_") and set(h.candidate_ids) == set(_matched_ids(cands))]
+            conf = min(conf, verified[0].confidence if verified else score("observed_pattern"))
     kind = spec.kind if spec.kind in BASE_SCORES or spec.kind in RULE_KIND.values() else "llm_proposed"
     return _hyp(kind, spec.description, candidate_ids=_matched_ids(cands), evidence=evidence, passed=passed, confidence=conf, rule_id=spec.rule_id, generated_by="llm",
                 params={**p, "proposed_kind": spec.kind, "expected": expected, "observed": f.observed, "difference": round(f.observed - base, 2) if cands else None, "gross": base, "adjustment_kind": p.get("adjustment_kind", "fee"), "candidates": [_cand_summary(c) for c in cands]})
@@ -971,7 +992,10 @@ def _pick_best(hyps: list[Hypothesis]) -> Hypothesis | None:
     passed = [h for h in hyps if h.passed]
     if not passed:
         return None
-    return sorted(passed, key=lambda h: -h.confidence)[0]  # stable → generator order breaks ties
+    timing = next((h for h in passed if h.kind == "timing_lag"), None)
+    if timing and all(h.kind in ("exact_match", "counterparty_exact", "timing_lag", "observed_pattern", "precedent_drift") for h in passed):
+        return timing
+    return sorted(passed, key=lambda h: -h.confidence)[0]
 
 
 def _bank_category(f: BankFacts, best: Hypothesis) -> str:
@@ -1165,7 +1189,7 @@ async def _conclude(ctx: AgentContext, agent: BaseAgent, inv: Investigation, f: 
     title = (ap_info or {}).get("title") or f"{'Deposit' if f and f.side == 'in' else 'Payment'} {_money(float(observed))} from {counterparty.get('name') or 'unknown'}" + (f" vs {_money(float(expected))} (Δ {difference:+,.2f})" if expected and difference is not None else "")
     status = {Tier.HIGH: ExceptionStatus.OPEN, Tier.MEDIUM: ExceptionStatus.PENDING_AUDIT, Tier.LOW: ExceptionStatus.NEEDS_HUMAN}[best_tier]
     exc = ExceptionRecord(
-        **({"id": exception_id} if exception_id else {}),
+        id=exception_id or new_id("EXC"),
         period_id=ctx.period_id,
         run_id=ctx.run_id,
         entity_type=inv.entity_type,
@@ -1310,6 +1334,8 @@ async def execute_decision(ctx: AgentContext, agent: BaseAgent, decision: Decisi
     memo = f"{hypothesis.kind}: {hypothesis.description}"[:200]
     results: list[Any] = []
     try:
+        if not is_bank:
+            _mem(ctx, "ensure_entity", "Invoice", entity["id"], {"period_id": ctx.period_id})
         if decision.action == "reconcile" and is_bank:
             bt_id = entity["id"]
             matched = [i for i in decision.matched_ids if not i.startswith("BT-")]
@@ -1353,10 +1379,16 @@ async def execute_decision(ctx: AgentContext, agent: BaseAgent, decision: Decisi
         else:
             raise ValueError(f"unsupported action {decision.action}")
     except Exception as exc:  # noqa: BLE001
+        if is_bank:
+            for result in reversed(results):
+                if "before" in result:
+                    agent.call_tool("undo_reconciliation", execution=result)
         log.warning("execute_decision failed for %s: %s", entity.get("id"), exc, exc_info=True)
         agent.emit("decision.executed", f"Execution failed: {decision.action} {entity.get('id')}", str(exc)[:300], decision_id=decision.id, ok=False, error=str(exc))
         return False
     decision.status = DecisionStatus.EXECUTED
+    if is_bank:
+        hypothesis.params["executions"] = results
     decision.executed_at = datetime.now(timezone.utc)
     agent.emit(
         "decision.executed",
@@ -1397,7 +1429,7 @@ async def investigate_ap_invoice(ctx: AgentContext, agent: BaseAgent, ap_invoice
         inv.steps, inv.ms = agent.steps - steps0, (perf_counter() - t0) * 1000
         return inv
     inv.entity = row
-    if row.get("status") in ("paid", "void", "held"):
+    if row.get("status") in ("void", "held"):
         inv.status = "skipped"
         if exception_id and row.get("status") != "held":
             _close_exception(ctx, exception_id, resolved_by or f"agent:{agent.name}")
@@ -1448,6 +1480,8 @@ async def investigate_ap_invoice(ctx: AgentContext, agent: BaseAgent, ap_invoice
         else:
             evidence = [*base_evidence, _ev("precedent", f"no price-tolerance rule for {counterparty['name']} covers +{variance:.1%}", supports=False)]
             hyps.append(_announce(ctx, agent, _hyp("policy_price_variance", f"{row['id']} exceeds PO {twm['po']['id']} by {variance:.1%} — needs human approval", candidate_ids=[twm["po"]["id"]], evidence=evidence, passed=True, confidence=score("policy_price_variance"), params={"observed": usd, "expected": po_amount, "difference": round(usd - po_amount, 2), "po_id": twm["po"]["id"], "variance_pct": variance, "force_tier": Tier.LOW.value, "entity_type": "ap_invoice"})))
+    elif twm.get("has_po") and not twm.get("ok"):
+        hyps.append(_announce(ctx, agent, _hyp("policy_price_variance", f"{row['id']} has incomplete receiving evidence for PO {twm['po']['id']}", candidate_ids=[twm["po"]["id"]], evidence=[_ev("three_way_match", "Receiving evidence is missing or insufficient", supports=False)], passed=True, confidence=0.30, params={"po_id": twm["po"]["id"], "entity_type": "ap_invoice", "force_tier": Tier.LOW.value})))
     elif twm.get("has_po"):
         hyps.append(_announce(ctx, agent, _hyp("policy_price_variance", f"{row['id']} matches PO {twm['po']['id']} within tolerance", candidate_ids=[twm["po"]["id"]], evidence=[_ev("three_way_match", f"variance {variance:+.1%} within {settings.price_tolerance_pct:.0%}; received {_money(float(twm.get('received_total') or 0))}", supports=True, variance_pct=variance)], passed=False, params={"po_id": twm["po"]["id"], "variance_pct": variance, "entity_type": "ap_invoice"})))
 
@@ -1459,12 +1493,12 @@ async def investigate_ap_invoice(ctx: AgentContext, agent: BaseAgent, ap_invoice
         p = in_transit[0]
         end = datetime.fromisoformat(period["end_date"]).date()
         sent = datetime.fromisoformat(p["date"]).date()
-        late = 0 <= (end - sent).days <= IN_TRANSIT_DAYS
+        late = 0 <= (end - sent).days <= IN_TRANSIT_DAYS and not agent.call_tool("payment_has_bank_evidence", payment_id=p["id"], period_id=ctx.period_id)
         evidence = [
             _ev("timing", f"payment {p['id']} {_money(float(p['amount']))} sent {p['date']} via {p.get('method')} — {(end - sent).days} day(s) before period end, not yet on the bank statement", supports=late, sent=p["date"], period_end=period["end_date"]),
             _ev("amount_match", f"payment {_money(float(p['amount']))} vs invoice {_money(usd)}", supports=abs(float(p["amount"]) - usd) <= RULE_TOL + 0.03 * usd, expected=usd, observed=p["amount"]),
         ]
-        hyps.append(_announce(ctx, agent, _hyp("timing_lag", f"{row['id']} paid by {p['id']} on {p['date']} — clears next period (timing lag)", candidate_ids=[p["id"]], evidence=evidence, passed=late, params={"observed": float(p["amount"]), "expected": usd, "difference": round(float(p["amount"]) - usd, 2), "gross": usd, "payment_id": p["id"], "entity_type": "ap_invoice"})))
+        hyps.append(_announce(ctx, agent, _hyp("timing_lag", f"{row['id']} paid by {p['id']} on {p['date']} — clears next period (timing lag)", candidate_ids=[p["id"]], evidence=evidence, passed=late and abs(float(p["amount"]) - usd) <= RULE_TOL, params={"observed": float(p["amount"]), "expected": usd, "difference": round(float(p["amount"]) - usd, 2), "gross": usd, "payment_id": p["id"], "entity_type": "ap_invoice"})))
 
     inv.hypotheses = hyps
     inv.best = _pick_best(hyps)

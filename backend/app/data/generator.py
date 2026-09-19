@@ -253,11 +253,7 @@ PAYROLL_EMPLOYER_TAX_RATIO = 0.0865
 
 @dataclass(frozen=True)
 class GeneratorConfig:
-    """Volume knobs. Defaults follow ARCHITECTURE.md §2 scale for POs / AP / AR.
-
-    Bank volume is bounded by invoice volume (every clean bank txn maps to exactly one
-    payment or AR invoice), so raising the invoice counts is the way to raise bank volume.
-    """
+    """Volume knobs; clean AP installments preserve invoice totals and cash movement."""
 
     n_clean_po_invoices: int = 22
     n_received_not_invoiced_pos: int = 4
@@ -268,6 +264,7 @@ class GeneratorConfig:
     ar_paid_fraction: float = 0.78
     memo_reference_rate: float = 0.60
     small_bills: tuple[tuple[str, int], ...] = SMALL_BILL_PLAN
+    target_bank_transactions: int = 200
 
 
 # --------------------------------------------------------------------------- draft objects
@@ -500,6 +497,7 @@ class _PeriodCtx:
     payroll: list[PayrollRun] = field(default_factory=list)
     truths: list[_TruthSpec] = field(default_factory=list)
     group_counters: Counter = field(default_factory=Counter)
+    clean_settlements: list[tuple[APInvoice, Payment, _BankSpec, _TruthSpec, _TruthSpec]] = field(default_factory=list)
 
     @property
     def pid(self) -> str:
@@ -747,13 +745,46 @@ class _Generator:
         vendor_name = self.vendors[inv.vendor_id].name
         bt = self._bank(ctx, bt_date, -inv.amount, method, vendor_name, memo)
         pattern = "exact_match" if with_ref else "counterparty_exact"
-        self._truth(ctx, entity=bt, entity_type="bank_transaction", pattern=pattern,
+        bank_truth = self._truth(ctx, entity=bt, entity_type="bank_transaction", pattern=pattern,
                     params={"invoice_id": inv, "payment_id": pay, "memo_reference": with_ref},
                     matched=[pay],
                     explanation=f"{vendor_name} paid in full ({'memo cites reference' if with_ref else 'match by counterparty + amount'})")
-        self._truth(ctx, entity=inv, entity_type="ap_invoice", pattern=pattern,
+        invoice_truth = self._truth(ctx, entity=inv, entity_type="ap_invoice", pattern=pattern,
                     params={"payment_id": pay}, matched=[bt],
                     explanation=f"Paid by {pay.method.upper()} on {pay_date.isoformat()}")
+        ctx.clean_settlements.append((inv, pay, bt, bank_truth, invoice_truth))
+
+    def _expand_clean_settlements(self, ctx: _PeriodCtx, carry_count: int) -> None:
+        extra = max(0, self.config.target_bank_transactions - len(ctx.bank) - carry_count)
+        if not extra or not ctx.clean_settlements:
+            return
+        quotient, remainder = divmod(extra, len(ctx.clean_settlements))
+        for index, (invoice, payment, bank, truth, invoice_truth) in enumerate(ctx.clean_settlements):
+            count = 1 + quotient + (index < remainder)
+            if count == 1:
+                continue
+            weights = count * (count + 1) // 2
+            amounts = [_money(invoice.amount * weight / weights) for weight in range(1, count)]
+            amounts.append(_money(invoice.amount - sum(amounts)))
+            payment.amount = amounts[0]
+            bank.amount = -amounts[0]
+            base = f"{payment.method.upper()} DEBIT {self.vendors[invoice.vendor_id].name}"
+
+            def memo(pay: Payment, text: str = base) -> Callable[[], tuple[str, str]]:
+                return lambda: (f"{text} REF {pay.id}", pay.id)
+
+            bank.memo = memo(payment)
+            truth.pattern = invoice_truth.pattern = "exact_match"
+            truth.params["memo_reference"] = True
+            truth.explanation = "AP installment matched to its payment reference"
+            invoice_truth.explanation = "Fully paid across referenced AP installments"
+            for amount in amounts[1:]:
+                part = self._pay(ctx, invoice, payment.date, amount, payment.method)
+                debit = self._bank(ctx, bank.date, -amount, bank.type, bank.counterparty_hint, memo(part))
+                self._truth(ctx, entity=debit, entity_type="bank_transaction", pattern="exact_match",
+                            params={"invoice_id": invoice, "payment_id": part, "memo_reference": True},
+                            matched=[part], explanation="AP installment matched to its payment reference")
+                invoice_truth.matched.append(debit)
 
     def _open_ap_truth(self, ctx: _PeriodCtx, inv: APInvoice) -> None:
         self._truth(ctx, entity=inv, entity_type="ap_invoice", pattern="exact_match", params={},
@@ -1281,6 +1312,7 @@ class _Generator:
             period.opening_cash = _money(cash)
             ctx = _PeriodCtx(period=period, next_period=periods[idx + 1])
             self._build_period(ctx)
+            self._expand_clean_settlements(ctx, len(carry))
             self._materialise_period(ctx, carry)
             carry = ctx.carry_out
             cash += sum(b.amount for b in self.ds.bank_transactions if b.period_id == period.id)
