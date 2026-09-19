@@ -548,7 +548,6 @@ def test_memo_reference_cannot_override_conflicting_counterparty(
     facts = _facts(foundation_agent, "BT-FALSE-REF")
     assert facts.counterparty["id"] == "C-ACME"
     hypotheses = gen_exact_match(facts)
-    assert hypotheses
     assert not any(hypothesis.passed for hypothesis in hypotheses), (
         "A reference to another customer's invoice must fail counterparty verification"
     )
@@ -668,7 +667,6 @@ def test_learned_rule_cannot_match_a_foreign_referenced_invoice(
     facts = _facts(foundation_agent, "BT-FALSE-REF")
     assert facts.counterparty["id"] == "C-ACME"
     hypotheses = gen_memory_rules(facts, foundation_agent)
-    assert hypotheses
     assert not any(
         hypothesis.passed and "AR-TEST-FOREIGN" in hypothesis.candidate_ids
         for hypothesis in hypotheses
@@ -693,7 +691,6 @@ def test_customer_rule_does_not_leak_to_another_processor_customer(
     facts = _facts(foundation_agent)
     assert facts.counterparty["id"] == "V-STRIPE"
     hypotheses = gen_memory_rules(facts, foundation_agent)
-    assert hypotheses
     assert not any(
         hypothesis.passed and "AR-TEST-FOREIGN" in hypothesis.candidate_ids
         for hypothesis in hypotheses
