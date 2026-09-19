@@ -1,0 +1,92 @@
+.page {
+  min-width: 0;
+}
+
+.document {
+  width: 100%;
+  max-width: 980px;
+  margin-inline: auto;
+}
+
+.section {
+  scroll-margin-top: 2rem;
+}
+
+@media print {
+  :global(html):has(.page),
+  :global(body):has(.page),
+  :global(body) :global(*):has(.page) {
+    display: block !important;
+    position: static !important;
+    width: 100% !important;
+    max-width: none !important;
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: visible !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: white !important;
+    color: #111 !important;
+    color-scheme: light;
+  }
+
+  :global(body):has(.page) :global(*):not(:has(.page)):not(.page):not(.page *) {
+    display: none !important;
+  }
+
+  .page .controls,
+  .page .screenOnly {
+    display: none !important;
+  }
+
+  .page,
+  .page * {
+    background: transparent !important;
+    color: #111 !important;
+    border-color: #ccc !important;
+    box-shadow: none !important;
+    text-shadow: none !important;
+    overflow: visible !important;
+    animation: none !important;
+  }
+
+  .page {
+    padding: 12mm;
+    font-size: 10pt;
+    line-height: 1.5;
+  }
+
+  .document {
+    max-width: none;
+    border: 0 !important;
+    border-radius: 0 !important;
+    padding: 0 !important;
+  }
+
+  .document h2,
+  .document h3,
+  .document h4 {
+    break-after: avoid;
+  }
+
+  .document p {
+    orphans: 3;
+    widows: 3;
+  }
+
+  .document li,
+  .document tr,
+  .document .keepTogether {
+    break-inside: avoid;
+  }
+
+  .document a {
+    text-decoration: underline;
+    overflow-wrap: anywhere;
+  }
+
+  .document pre {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+}
