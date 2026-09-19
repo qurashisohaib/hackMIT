@@ -118,7 +118,12 @@ def bank_checks(agent: BaseAgent, entity: dict, hypothesis: Hypothesis, spec: Ru
         spec = RuleSpec.model_validate(node.props)
         checks.append(check("rule_status", node.props.get("status") == "active", "Rule must be active"))
     if spec:
-        scope_ok = spec.scope_type.value == "global" or spec.scope_type.value == cp["type"] and spec.scope_id == cp["id"]
+        scope_ok = (
+            spec.scope_type.value == "global"
+            or spec.scope_type.value == cp["type"] and spec.scope_id == cp["id"]
+            or spec.scope_type.value == "customer" and bool(roots)
+            and all(row["kind"] == "ar_invoice" and row["customer_id"] == spec.scope_id for row in roots)
+        )
         checks.append(check("rule_scope", scope_ok, "Rule scope agrees with financial counterparty"))
         if spec.pattern_type.value == "fx_tolerance":
             checks.append(check("currency", foreign_currency, "FX policy requires foreign currency evidence"))

@@ -285,6 +285,9 @@ def cytoscape_elements(
             selected = kept
 
     ordered = sorted(selected, key=lambda nid: (created_at_of(by_id[nid]), nid), reverse=True)
+    if focus is not None:
+        ordered.remove(focus)
+        ordered.insert(0, focus)
     if limit is not None and limit >= 0:
         ordered = ordered[:limit]
     keep = set(ordered)

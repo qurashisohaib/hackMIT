@@ -5,7 +5,7 @@
  * timeout, JSON handling and a structured `ApiError`. Use `isOffline(err)` to
  * decide whether to show the "backend offline" banner.
  *
- * Base URL: `process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"`.
+ * Base URL: same origin, or `process.env.NEXT_PUBLIC_API_URL`.
  */
 import type {
   CloseReport,
@@ -31,7 +31,7 @@ import type {
 } from "./types";
 
 /** Origin of the backend, without trailing slash (e.g. http://localhost:8000). */
-export const API_BASE = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000").replace(/\/+$/, "");
+export const API_BASE = (process.env.NEXT_PUBLIC_API_URL ?? "").replace(/\/+$/, "");
 
 /** `${API_BASE}/api` — prefix for every REST + SSE route. */
 export const API_URL = `${API_BASE}/api`;

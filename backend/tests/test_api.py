@@ -446,3 +446,37 @@ async def test_actual_pipeline_api_close_teach_and_views(api: API) -> None:
     assert report.status_code == 200
     CloseReport.model_validate(report.json())
     assert len((await api.client.get("/api/runs")).json()) == 1
+
+
+async def test_global_deliverables_are_read_without_rebuilding(api: API) -> None:
+    forecast = ForecastView(
+        period_id="2026-01", as_of="2026-01-31", opening_cash=123, weeks=[], assumptions=[],
+    )
+    report = CloseReport(
+        period_id="2026-01", run_id="RUN-SAVED", status="pending_review", summary="Saved report",
+        sections=[], checklist=[], generated_at=utcnow().isoformat(),
+        metrics=RunMetrics(period_id="2026-01", run_id="RUN-SAVED", human_reviews=13),
+    )
+    for key, view in (("forecast", forecast), ("report", report)):
+        api.manager.memory.record_observation("global", "2026-01", key, view.model_dump(), "2026-01")
+    with api.manager.mutation("another period is running"):
+        assert (await api.client.get("/api/forecast?period_id=2026-01")).json() == forecast.model_dump()
+        assert (await api.client.get("/api/reports/2026-01")).json() == report.model_dump()
+    assert api.manager.memory.store.find_nodes("AgentRun") == []
+
+
+async def test_earlier_rerun_is_rejected_before_creating_a_run(api: API) -> None:
+    add_completed_run(api, "RUN-FEB", "2026-02")
+    response = await api.client.post("/api/runs", json={"period_id": "2026-01"})
+    assert response.status_code == 409 and "Later periods" in response.json()["detail"]
+    assert len(api.manager.list()) == 1
+
+
+async def test_graph_focus_survives_recency_limit(api: API) -> None:
+    store = api.manager.memory.store
+    root = store.add_node("Rule", {"created_at": "2026-01-01"})
+    for i in range(3):
+        neighbor = store.add_node("Decision", {"created_at": f"2026-02-0{i + 1}"})
+        store.add_edge(neighbor, "USED_PRECEDENT", root)
+    response = await api.client.get(f"/api/memory/graph?focus={root}&limit=1")
+    assert [node["data"]["id"] for node in response.json()["nodes"]] == [root]

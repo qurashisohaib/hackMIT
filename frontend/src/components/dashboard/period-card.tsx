@@ -63,7 +63,8 @@ export function PeriodCard({ period, suggested = false, disabled = false, starti
   const unreconciled = statValue(stats, STAT_KEYS.unreconciled);
   const isRunning = !!live && live.runStatus !== "completed" && live.runStatus !== "failed";
   const ended = !!live && (live.runStatus === "completed" || live.runStatus === "failed");
-  const closed = period.status === "closed";
+  const closed = period.status === "closed" || !!period.last_run_id;
+  const runLabel = closed && period.id === "2026-01" ? "Re-run January with memory" : closed ? `Re-run ${month} close` : `Run ${month} Close`;
   const finalMetrics = live?.metrics ?? metrics ?? null;
 
   return (
@@ -129,7 +130,9 @@ export function PeriodCard({ period, suggested = false, disabled = false, starti
             <LiveCounters live={live} compact />
           )}
         </div>
-      ) : (
+      ) : null}
+
+      {!live || ended ? (
         <div className="mt-auto flex items-center gap-2">
           <Button
             className="flex-1"
@@ -137,10 +140,10 @@ export function PeriodCard({ period, suggested = false, disabled = false, starti
             onClick={() => onRun(period.id)}
             disabled={disabled}
             loading={starting}
-            title={disabled ? "Backend offline or a run is already in progress" : `Run the ${month} close`}
+            title={disabled ? "Backend offline or a run is already in progress" : runLabel}
           >
             {starting ? null : closed ? <RotateCw aria-hidden /> : <Play aria-hidden />}
-            {starting ? "Starting…" : closed ? `Re-run ${month} close` : `Run ${month} Close`}
+            {starting ? "Starting…" : runLabel}
           </Button>
           {period.last_run_id ? (
             <Link
@@ -152,7 +155,7 @@ export function PeriodCard({ period, suggested = false, disabled = false, starti
             </Link>
           ) : null}
         </div>
-      )}
+      ) : null}
 
       {!live && metrics ? (
         <p className="font-mono text-[10px] text-subtle">

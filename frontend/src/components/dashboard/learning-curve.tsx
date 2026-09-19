@@ -169,7 +169,7 @@ export function LearningCurve({ metrics, loading, className }: LearningCurveProp
             Learning curve
           </CardTitle>
           <CardDescription>
-            Accuracy is scored against hidden ground truth. Human reviews should fall as rules are learned and trusted.
+            Initial close snapshots, before teaching. Accuracy covers decided items; open items reduce coverage.
           </CardDescription>
         </div>
         {points.length ? (

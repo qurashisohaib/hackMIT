@@ -62,6 +62,11 @@ class RunManager:
         period = self.require_period(period_id)
         if period.status == "future":
             raise HTTPException(409, "A future holding period cannot be closed")
+        if any(
+            node.props["period_id"] > period_id and not node.props.get("superseded")
+            for node in self.memory.store.find_nodes("AgentRun", status="completed")
+        ):
+            raise HTTPException(409, "Later periods already ran. Reset the demo to rerun chronologically.")
         run_id = new_id("RUN")
         run = RunView(run_id=run_id, period_id=period_id, status="queued", brain=get_brain().name)
         self._runs[run_id] = run
@@ -87,7 +92,6 @@ class RunManager:
                 if period is None:
                     raise ValueError(f"Unknown period: {run.period_id}")
                 period.last_run_id = run.run_id
-                period.status = "in_progress"
             self._context = cfo.make_context(run.period_id, run_id=run.run_id)
             self._persist(run)
             summary = await cfo.run_period_close(run.period_id, run_id=run.run_id, ctx=self._context)

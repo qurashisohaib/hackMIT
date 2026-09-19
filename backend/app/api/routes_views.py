@@ -67,7 +67,7 @@ async def forecast(manager: Manager, period_id: str | None = None) -> ForecastVi
         if period_id is None:
             return ForecastView(period_id="", as_of="", opening_cash=0, weeks=[], assumptions=[])
     manager.require_period(period_id)
-    for node in manager.memory.observations("period", period_id, "forecast"):
+    for node in manager.memory.store.find_nodes("Observation", scope_id=period_id, key="forecast"):
         try:
             return ForecastView.model_validate(node.props["value"])
         except (ValidationError, KeyError):
@@ -82,7 +82,7 @@ async def forecast(manager: Manager, period_id: str | None = None) -> ForecastVi
 async def report(period_id: str, manager: Manager) -> CloseReport:
     manager.require_period(period_id)
     for key in ("close_report", "report"):
-        for node in manager.memory.observations("period", period_id, key):
+        for node in manager.memory.store.find_nodes("Observation", scope_id=period_id, key=key):
             try:
                 return CloseReport.model_validate(node.props["value"])
             except (ValidationError, KeyError):

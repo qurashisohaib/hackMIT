@@ -1,6 +1,7 @@
 """Deterministic offline integration smoke. Run: uv run python -m scripts.smoke_pipeline."""
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 from pathlib import Path
@@ -54,8 +55,8 @@ async def teach(ctx: AgentContext, spec: RuleSpec) -> str:
     raise AssertionError(f"No financial evidence supports {spec.description}: {failures}")
 
 
-async def exercise() -> dict[str, RunMetrics]:
-    january = cfo.make_context("2026-01", step_delay_ms=0)
+async def exercise(step_delay_ms: int = 0) -> dict[str, RunMetrics]:
+    january = cfo.make_context("2026-01", step_delay_ms=step_delay_ms)
     run = await cfo.run_period_close("2026-01", ctx=january)
     assert run.metrics
     jan = run.metrics
@@ -64,7 +65,9 @@ async def exercise() -> dict[str, RunMetrics]:
     assert jan.precedent_hits == 0, jan
     for rule in TEACHINGS:
         await teach(january, rule)
-    february = cfo.make_context("2026-02", step_delay_ms=0)
+    jan_corrected = cfo.compute_metrics(january)
+    print_metrics("January after teaching", jan_corrected)
+    february = cfo.make_context("2026-02", step_delay_ms=step_delay_ms)
     run = await cfo.run_period_close("2026-02", ctx=february)
     assert run.metrics
     feb = run.metrics
@@ -72,7 +75,7 @@ async def exercise() -> dict[str, RunMetrics]:
     assert feb.precedent_hits >= 10, feb
     assert feb.human_reviews <= 4, feb
     assert feb.accuracy is not None and feb.accuracy >= 0.9, feb
-    march = cfo.make_context("2026-03", step_delay_ms=0)
+    march = cfo.make_context("2026-03", step_delay_ms=step_delay_ms)
     run = await cfo.run_period_close("2026-03", ctx=march)
     assert run.metrics
     mar = run.metrics
@@ -84,11 +87,17 @@ async def exercise() -> dict[str, RunMetrics]:
     superseded = memory.store.neighbors(new_rule, rel="SUPERSEDES", direction="out", label="Rule")
     assert len(superseded) == 1 and superseded[0].props["params"]["rate"] == 0.02
     assert all(memory.store.get_node(node.id).props["status"] == "resolved" for node in drift)
-    print_metrics("March corrected", cfo.compute_metrics(march))
-    return {"january": jan, "february": feb, "march": mar}
+    mar_corrected = cfo.compute_metrics(march)
+    print_metrics("March corrected", mar_corrected)
+    return {"january": jan, "january_corrected": jan_corrected, "february": feb, "march": mar, "march_corrected": mar_corrected}
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--step-delay-ms", type=int, default=0)
+    args = parser.parse_args()
+    if args.step_delay_ms < 0:
+        parser.error("--step-delay-ms must be non-negative")
     root = Path.home() / ".cfo-smoke"
     root.mkdir(exist_ok=True)
     with TemporaryDirectory(prefix="pipeline-", dir=root) as isolated:
@@ -100,7 +109,7 @@ def main() -> None:
         bus.clear()
         seed_database(reset=True)
         reset_memory_service()
-        asyncio.run(exercise())
+        asyncio.run(exercise(args.step_delay_ms))
         reset_engine()
     print("Offline pipeline acceptance passed.", flush=True)
 

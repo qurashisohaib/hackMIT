@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy import inspect, select
 
 from app.config import settings
-from app.data.generator import SyntheticDataset, generate_dataset
+from app.data.generator import GeneratorConfig, SyntheticDataset, generate_dataset
 from app.data.seed import seed_database
 from app.db import session as db_session
 from app.db.models import BankTransaction, Base, Period
@@ -89,6 +89,22 @@ def test_different_seed_changes_financial_data(dataset: SyntheticDataset) -> Non
     assert [
         (row.date, row.amount, row.description) for row in dataset.bank_transactions
     ] != [(row.date, row.amount, row.description) for row in other.bank_transactions]
+
+
+def test_installments_preserve_cash_and_invoice_obligations(dataset: SyntheticDataset) -> None:
+    baseline = generate_dataset(42, "Acceptance Company", GeneratorConfig(target_bank_transactions=0))
+    for period in PERIODS:
+        before = sum(row.amount for row in baseline.bank_transactions if row.period_id == period)
+        after = sum(row.amount for row in dataset.bank_transactions if row.period_id == period)
+        assert after == pytest.approx(before, abs=0.01)
+    expected: dict[str, float] = defaultdict(float)
+    actual: dict[str, float] = defaultdict(float)
+    for payment in baseline.payments:
+        assert len(payment.ap_invoice_ids) == 1
+        expected[payment.ap_invoice_ids[0]] += payment.amount
+    for payment in dataset.payments:
+        actual[payment.ap_invoice_ids[0]] += payment.amount
+    assert dict(actual) == pytest.approx(dict(expected), abs=0.01)
 
 
 @pytest.mark.parametrize("period_id", PERIODS)

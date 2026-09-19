@@ -699,13 +699,19 @@ def gen_memory_rules(f: BankFacts, agent: BaseAgent) -> list[Hypothesis]:
     """Each applicable learned Rule → parameterised hypothesis tested against the open items."""
     if not f.rules:
         return []
-    pool = [c for c in f.own_candidates() if c["kind"] in ("ar_invoice", "ap_invoice", "payment") and not c.get("settled")]
+    candidates = [c for c in f.own_candidates() if c["kind"] in ("ar_invoice", "ap_invoice", "payment") and not c.get("settled")]
     referenced_ids = {c["id"] for c in f.referenced}
     out: list[Hypothesis] = []
     for rule in f.rules:
         kind = RULE_KIND.get(rule["pattern_type"] or "")
         if kind is None:
             continue
+        pool = [
+            c for c in candidates
+            if rule["scope_type"] == "global"
+            or rule["scope_type"] == f.counterparty["type"] and rule["scope_id"] == f.counterparty["id"]
+            or rule["scope_type"] == c["counterparty_type"] and rule["scope_id"] == c["counterparty_id"]
+        ]
         fits: list[tuple[dict[str, Any], dict[str, Any], float]] = []
         for c in pool:
             base = c["expected_usd"]

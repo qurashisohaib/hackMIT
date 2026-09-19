@@ -13,7 +13,7 @@ from app.agents.recon import ReconAgent
 from app.agents.records import open_exceptions, remember
 from app.config import settings
 from app.data.seed import seed_database
-from app.db.models import APInvoice, ARInvoice, BankTransaction, GroundTruth, LedgerEntry
+from app.db.models import APInvoice, ARInvoice, BankTransaction, GroundTruth, LedgerEntry, Payment
 from app.db.session import reset_engine
 from app.events import bus
 from app.memory.service import MemoryService, reset_memory_service
@@ -198,3 +198,37 @@ async def test_controller_can_teach_with_natural_language(isolated: MemoryServic
     rule = isolated.store.get_node(result.rule_id)
     assert rule.props["params"] == {"rate": 0.03, "direction": "deduct"}
     assert rule.props["scope_id"] == "V-STRIPE"
+
+
+async def test_full_memory_january_rerun_preserves_settlements(isolated: MemoryService) -> None:
+    first = cfo.make_context("2026-01", step_delay_ms=0)
+    cold = await cfo.run_period_close(first.period_id, ctx=first)
+    for spec in TEACHINGS:
+        await teach(first, spec)
+    with first.session() as session:
+        before = {
+            row.id: row.paid_amount
+            for model in (APInvoice, ARInvoice)
+            for row in session.scalars(select(model).where(model.period_id == first.period_id))
+        }
+        entries_before = len(session.scalars(select(LedgerEntry).where(LedgerEntry.created_by.like("agent:%"))).all())
+    cfo.reset_period_state(first.period_id, isolated)
+    fresh = cfo.make_context(first.period_id, step_delay_ms=0)
+    learned = await cfo.run_period_close(fresh.period_id, ctx=fresh)
+    assert cold.metrics and cold.metrics.human_reviews == 13 and cold.metrics.precedent_hits == 0
+    assert learned.metrics and learned.metrics.human_reviews == 3 and learned.metrics.precedent_hits == 10
+    assert learned.metrics.accuracy == 1
+    assert isolated.store.get_node(cold.run_id).props["metrics"]["human_reviews"] == 13
+    with fresh.session() as session:
+        after = {
+            row.id: row.paid_amount
+            for model in (APInvoice, ARInvoice)
+            for row in session.scalars(select(model).where(model.period_id == fresh.period_id))
+        }
+        assert after == before
+        entries_after = len(session.scalars(select(LedgerEntry).where(LedgerEntry.created_by.like("agent:%"))).all())
+        assert entries_after == entries_before
+        for payment in session.scalars(select(Payment).where(Payment.bank_txn_id.is_not(None))):
+            transaction = session.get(BankTransaction, payment.bank_txn_id)
+            assert transaction and transaction.reconciled
+            assert payment.id in transaction.reconciled_with
